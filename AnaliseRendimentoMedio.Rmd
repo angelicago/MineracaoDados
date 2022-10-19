@@ -3,3 +3,291 @@ output:
   html_notebook: default
   html_document: default
 ---
+
+Aplicação de Análise de Regressão em Indicadores: Pobreza, distribuição e desigualdade de renda. O objetivo do trabalho é aplicar análise de regressão para prever a média salarial de acordo com o sexo, raça e localização do domicílio. Fonte dos dados utilizados: <https://www.ipea.gov.br/retrato/indicadores_pobreza_distribuicao_desigualdade_renda.html>
+
+Carregando os pacotes necessários:
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(skimr) # visualização de dados
+library(corrplot)
+library(vip)
+library(rpart.plot)
+```
+
+Carregando o conjunto de dados:
+
+```{r}
+dados <- read_csv2("Rendimentos.csv")
+dados$Ano <- NULL
+dados <- janitor::clean_names(dados)
+dados <- rename(dados,rendimento = rendimento_medio_mensal_no_trabalho_principal, localizacao = regiao_e_localizacao_do_domicilio )
+
+dados <- dados |>
+  mutate(cor_raca  = as.factor(cor_raca)) |>
+  mutate(localizacao = as.factor(localizacao))|>
+  mutate(sexo = as.factor(sexo))
+  #mutate(rendimento = log(rendimento))
+```
+
+```{r}
+glimpse(dados)
+```
+
+```{r}
+dados |>
+  skim()
+```
+
+Exploração dos dados:
+
+```{r}
+dados |> group_by(sexo) |> summarise(media = mean(rendimento), 
+                                             mediana = median(rendimento))
+```
+
+```{r}
+ggplot(dados) + geom_boxplot(aes(x =rendimento, y = sexo))
+```
+
+Analisando a média salarial e também o gráfico de boxplot percebe-se que há uma diferença salarial por sexo onde o sexo masculina aparenta ser maior que o feminino. Neste caso é interessante aplicar um teste de hipotese para verificar essa afirmação
+
+Teste de hipótese: Hipótese Nula: Salarios para sexo Masculino e Feminino vêm da mesma distribuição, ou seja, tem a mesma média Hipótese Alternativa: media do salário do sexo Masculino é maior do que a média salarial Feminino
+
+```{r}
+salariosM <- dados |> filter(sexo == "Masculino")
+salariosF <- dados |> filter(sexo == "Feminino")
+wilcox.test(x = salariosM$rendimento, 
+            y = salariosF$rendimento,
+            alternative = "greater")
+cat("Como p-value = 1.618e-07 então ficamos com a hipótese alternativa.")
+```
+
+Variação do rendimento por cor_raça:
+
+```{r}
+dados |>
+  group_by(cor_raca) |>
+  summarise(rendimento = round(mean(rendimento),2)) |> 
+  ggplot(aes(x = cor_raca, y = rendimento)) +
+  geom_col(stat="identity",fill="lightblue") +
+  geom_text(aes(label = rendimento, vjust = 2))+
+  ggtitle("Rendimento Médio por Cor/Raça")
+
+```
+
+Analisando o rendimento por raça é possível verificar que a média salarial para a cor/raça branca é maior do que para cor/raça negra.
+
+Variação do rendimento por localização:
+
+```{r}
+dados |>
+  group_by(localizacao) |>
+  summarise(rendimento = round(mean(rendimento),2)) |>
+  ggplot(aes(x = localizacao, y = rendimento)) +
+  geom_col(stat="identity",fill="purple") +
+  geom_text(aes(label = rendimento, vjust = 2))+
+   ggtitle("Rendimento Médio por localização")
+
+```
+
+Analisando o rendimento por localização é possível verificar que a média salarial para a zona urbana é maior do que para zona rural.
+
+################################################################################################################################# 
+
+Árvores de Decisão:
+
+A árvore de decisão é especificadas como decision_tree() e possui três hiperparâmetros:cost_complexity (O parâmetro de complexidade de custo), tree_depthe (A profundidade máxima de uma árvore) e min_n (o número mínimo de pontos de dados em um nó que são necessários para que o nó seja dividido ainda mais). Para utilização dos ajustes de hiperparâmetros, será criado validação crizada nos dados de treinamento.
+
+Separação dos dados entre treinamento e teste
+
+Essa separação é feito para testar a perfomance do modelo em dados não visto anteriormente e ajuda a evitar overfitting (ocorre quando o modelo tem um desempenho bom nos dados de treino mas nos dados de teste o resultado é ruim). Será utilizado 75% da base para treinar e os demais para testar. Os dados de treinamento serão divididos em 5 dobras para ajuste de hiperparâmetros.
+
+```{r}
+dados$rendimento <- log10(dados$rendimento)
+```
+
+```{r}
+set.seed(314)
+divisao_dados <- initial_split(data = dados,strata = "rendimento" ,prop = 0.75)
+dados_treinamento <- training(divisao_dados)
+dados_teste <- testing(divisao_dados)
+
+set.seed(314)
+cv <- vfold_cv(dados_treinamento, v = 5)
+```
+
+Engenharia de Recurso:
+
+Nesta etapa será criado a receita de engenharia de recursos para o conjunto de dados. Será aplicado algumas transformações nos dados:
+
+-   step_dummy : Crie variáveis fictícias (0 ou 1) para todos os preditores nominais
+
+```{r}
+receita <- recipe(rendimento  ~ ., data = dados_treinamento) |>
+                       step_dummy(all_nominal(), -all_outcomes())
+```
+
+Verificando se as etapas de engenharia de recursos foram executadas corretamente.
+
+```{r}
+receita |> 
+  prep() |>
+  bake(new_data = dados_treinamento)
+```
+
+Especificação modelo:
+
+Para a criação do modelo será utilizado o mecanismo rpart que permitirá fazer gráficos do modelo de árvore de decião com a função rpart.plot
+
+```{r}
+arvoredecisao <- decision_tree(cost_complexity = tune(),
+                            tree_depth = tune(),
+                            min_n = tune()) |>
+              set_engine('rpart') |> 
+              set_mode('regression')
+```
+
+Fluxo de trabalho:
+
+Combinando o modelo e a receita em um fluxo de trabalho para gerenciar facilmente o processo de construção do modelo.
+
+```{r}
+tree_workflow <- workflow() |>
+                 add_model(arvoredecisao) |>
+                 add_recipe(receita)
+```
+
+Ajuste de hiperparâmetro: Para modelos com múltiplos hiperparâmetros, tidymodels tem a função grid_regular() que cria automaticamente uma grade de ajuste com combinações de valores de hiperparâmetros sugeridos.Essa função recebe os hiperparâmetros com o argumentos levels (opção é usada para determinar o número de valores a serem criados para cada hiperparâmetro exclusivo).
+
+```{r}
+## Create a grid of hyperparameter values to test
+tree_grid <- grid_regular(cost_complexity(),
+                          tree_depth(),
+                          min_n(), 
+                          levels = 2)
+tree_grid
+```
+
+Ajustando hiperparâmetros com tune_grid():
+
+Para encontrar a combinação ideal de hiperparâmetros de nossa grade de ajuste, usaremos a função tune_grid()..
+
+```{r}
+set.seed(314)
+## Tune decision tree workflow
+tree_tuning <- tree_workflow |>
+               tune_grid(resamples = cv,
+                         grid = tree_grid)
+```
+
+Para visualizar os resultados do ajuste de hiperparâmetros, pode-se utilizar a função show_best(). Deve se passado o tipo de métrica de desempenho que deseja ver na função show_best().
+
+A partir dos resultados abaixo, para cada combinação de hiperparâmetros na grade, tune_grid() ajusta um modelo de árvore de decisão com essa combinação 5 vezes (já que temos 5 dobras em nosso objeto de validação cruzada).
+
+A coluna dos resultados mean abaixo indica o valor médio da métrica de desempenho que foi obtida.
+
+```{r}
+show_best(tree_tuning,metric = 'rmse')
+```
+
+Pode-se utiliar o select_best() modelo para selecionar o modelo dos resultados de ajuste que teve o melhor desempenho geral. No código abaixo, é especificado para selecionar o melhor modelo de desempenho com base no rmse (calcula o quão próximo os pontos de dados reais estão dos valores previstos pelo modelo e é usado para medir o desvio padrão dos resíduos).
+
+Vemos que o modelo com complexidade de custo de 1 -10 , profundidade de árvore de 15 e mínimo n de 2 produziu o melhor modelo.
+
+```{r}
+
+best_tree <- tree_tuning |> 
+             select_best(metric = "rmse")
+
+# View the best tree parameters
+best_tree
+```
+
+Finalizar fluxo de trabalho:
+
+A última etapa no ajuste de hiperparâmetro é usar finalize_workflow() para adicionar no modelo ideal ao objeto de fluxo de trabalho.
+
+```{r}
+final_tree_workflow <- tree_workflow |>
+                       finalize_workflow(best_tree)
+```
+
+Visualizar resultados e Ajustar o modelo:
+
+Para visualizar o modelo de árvore de decisão, precisa treinar manualmente o objeto de fluxo de trabalho com a função fit().
+
+```{r}
+tree_wf_fit <- final_tree_workflow |> 
+               fit(data = dados_treinamento)
+```
+
+Explorando o modelo treinado:
+
+Uma vez que é treinado o modelo em no conjunto de dados de treinamento, pode-se estudar a importância variável com a função vip().
+
+A primeira etapa é extrair o modelo treinado de nosso ajuste de fluxo de trabalho, tree_wf_fit. Isso pode ser feito passando tree_wf_fit para a função extract_fit_parsnip().
+
+```{r}
+tree_fit <- tree_wf_fit |>
+            extract_fit_parsnip()
+```
+
+Importância das variáveis:
+
+Em seguida passamos tree_fit para a função vip(). Isso retornará um ggplot com as pontuações de importância da variável do modelo. As pontuações de importância são baseadas nos critérios de divisão da árvore de decisão treinada.
+
+Analisando o resultados do gráfico abaixo as variáveis: localizacao_Urbano, sexo_Masculino, cor_raca_Negra são os preditores mais importantes para rendimento médio.
+
+```{r}
+vip(tree_fit) +
+   ggtitle("Variáveis de maior importância")
+```
+
+Gráfico da Árvore de Decisão
+
+Visualizando a árvore de decisão treinada usando a função rpart.plot() do pacote rpart.plot. Deve-se passar o objeto fit armazenado dentro tree_fit da função rpart.plot() para fazer um gráfico de árvore de decisão.
+
+```{r}
+rpart.plot(tree_fit$fit, roundint = FALSE)
+```
+
+Treinando e avaliando o modelo:
+
+Ajustando o fluxo de trabalho do modelo final aos dados de treinamento e avaliando o desempenho nos dados de teste.
+
+A função last_fit() ajustará o fluxo de trabalho aos dados de treinamento e gerará previsões nos dados de teste conforme definido pela divisão dos dados.
+
+```{r}
+tree_last_fit <- final_tree_workflow |>
+                 last_fit(divisao_dados)
+```
+
+Visualizando as métricas de desempenho nos dados de teste
+
+```{r}
+tree_last_fit |> 
+  collect_metrics(truth = rendimento, estimate = .pred)
+```
+
+```{r}
+tree_last_fit <- 
+  dados_teste |>
+  select(rendimento) |>
+  #mutate(rendimento = log10(rendimento)) |>
+  bind_cols(
+    collect_predictions(tree_last_fit, new_data = dados_teste)
+           )
+tree_last_fit <- janitor::clean_names(tree_last_fit)
+tree_last_fit <- 
+  tree_last_fit |>
+  rename(rendimento = rendimento_1) 
+tree_last_fit |> select(rendimento,pred)
+```
+
+```{r}
+tree_last_fit |> select(rendimento,pred)
+```
