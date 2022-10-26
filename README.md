@@ -1,2 +1,2 @@
 # Mineração de Dados
- Análise de Árvore de Regressão em Indicadores de Pobreza, distribuição e desigualdade de renda
+ Analise de Arvore de Regressao em Indicadores de Pobreza, distribuicao e desigualdade de renda
